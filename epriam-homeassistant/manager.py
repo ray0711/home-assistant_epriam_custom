@@ -61,6 +61,7 @@ class EPriamManager:
         return None
 
     def _notification_handler(self, sender, data: bytearray):
+        _LOGGER.info(f"[Manager] Battery/Status Notify Payload: {data.hex()}")
         if len(data) >= 4:
             voltage = (data[3] & 0xFF) * 2
             pct = int(((voltage - 315) * 100) / 65)
@@ -68,7 +69,7 @@ class EPriamManager:
         self._notify_callbacks()
 
     def _rocking_notification_handler(self, sender, data: bytearray):
-        _LOGGER.debug(f"[Manager] Rocking Notify Payload: {data.hex()}")
+        _LOGGER.info(f"[Manager] Rocking Notify Payload: {data.hex()}")
         if len(data) >= 5:
             intensity = data[0] & 0xF
             
@@ -194,3 +195,17 @@ class EPriamManager:
                 return False
         except Exception as e:
             return False
+
+    async def async_send_raw_payload(self, hex_payload: str) -> bool:
+        """Send a raw hex payload to the rocking characteristic for diagnostics."""
+        try:
+            payload = bytearray.fromhex(hex_payload)
+        except ValueError as e:
+            _LOGGER.error(f"[Manager] Invalid hex payload: {hex_payload} - {e}")
+            return False
+            
+        _LOGGER.info(f"[Manager] Sending raw payload: {payload.hex()} to rocking characteristic")
+        success = await self._write_to_char(CHAR_ROCKING, payload)
+        self._notify_callbacks()
+        return success
+

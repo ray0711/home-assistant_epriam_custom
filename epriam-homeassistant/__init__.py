@@ -22,6 +22,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     
     await manager.start()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    async def handle_send_payload(call):
+        payload = call.data.get("payload")
+        await manager.async_send_raw_payload(payload)
+
+    hass.services.async_register(
+        DOMAIN,
+        "send_rocking_payload",
+        handle_send_payload,
+    )
+
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -30,4 +41,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
+        if not hass.data[DOMAIN]:
+            hass.services.async_remove(DOMAIN, "send_rocking_payload")
     return unload_ok

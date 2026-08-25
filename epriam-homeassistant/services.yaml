@@ -1,0 +1,10 @@
+send_rocking_payload:
+  name: Send Rocking Payload
+  description: Send a raw hex payload directly to the stroller's rocking characteristic.
+  fields:
+    payload:
+      name: Hex Payload
+      description: The raw hex bytes to write (e.g. 01033c00 or 00).
+      required: true
+      selector:
+        text:
