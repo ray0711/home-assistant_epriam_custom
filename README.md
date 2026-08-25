@@ -2,6 +2,8 @@
 
 This Home Assistant custom component establishes a continuous BLE connection to the Cybex E-Priam electric stroller (routing through Home Assistant's native Bluetooth stack/ESPHome BLE proxies). By running a persistent background connection loop, it bypasses the stroller's default hardware timeout limits, providing real-time status tracking and dashboard controls for rocking.
 
+![e-Priam Custom BLE Integration Demo](demo.png)
+
 > [!CAUTION]
 > ### ⚠️ SAFETY DISCLAIMER & WARRANTY WARNING
 > **THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.**
