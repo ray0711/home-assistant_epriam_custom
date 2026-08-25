@@ -61,7 +61,7 @@ class EPriamManager:
         return None
 
     def _notification_handler(self, sender, data: bytearray):
-        _LOGGER.info(f"[Manager] Battery/Status Notify Payload: {data.hex()}")
+        _LOGGER.debug(f"[Manager] Battery/Status Notify Payload: {data.hex()}")
         if len(data) >= 4:
             voltage = (data[3] & 0xFF) * 2
             pct = int(((voltage - 315) * 100) / 65)
@@ -69,18 +69,19 @@ class EPriamManager:
         self._notify_callbacks()
 
     def _rocking_notification_handler(self, sender, data: bytearray):
-        _LOGGER.info(f"[Manager] Rocking Notify Payload: {data.hex()}")
+        _LOGGER.debug(f"[Manager] Rocking Notify Payload: {data.hex()}")
         if len(data) >= 5:
-            intensity = data[0] & 0xF
+            intensity_raw = data[0] & 0xF
             
             # 16-bit integer (little endian) in seconds
             time_left = (data[1] & 255) | ((data[2] & 255) << 8)
             
             self.time_remaining = time_left
-            self.rocking_active = (time_left > 0 or intensity > 0)
+            self.rocking_active = (time_left > 0 or intensity_raw > 0)
             
-            if 1 <= intensity <= 3:
-                self.rocking_intensity = intensity
+            if 1 <= intensity_raw <= 3:
+                # Map stroller intensity (1=Fastest, 3=Slowest) back to UI (1=Low/Slowest, 3=High/Fastest)
+                self.rocking_intensity = 4 - intensity_raw
             
             if data[0] == 0x94: # 148 ^ 128 = 20 (Brake not engaged)
                 _LOGGER.warning("[Manager] Stroller reported: Brake not engaged. Rocking cannot start.")
@@ -163,14 +164,19 @@ class EPriamManager:
             dur_lo = duration_s & 0xFF
             dur_hi = (duration_s >> 8) & 0xFF
             
-            # Payload format: [Command, Intensity, Duration_Lo, Duration_Hi]
-            payload = bytearray([0x01, self.rocking_intensity, dur_lo, dur_hi])
+            # Map UI intensity (1=Low/Slowest, 3=High/Fastest) to stroller command byte (0x03=Slowest, 0x01=Fastest)
+            stroller_intensity = 4 - self.rocking_intensity
+            
+            # Payload format: [Intensity_Command, Duration_Lo, Duration_Hi]
+            payload = bytearray([stroller_intensity, dur_lo, dur_hi])
+            _LOGGER.debug(f"[Manager] Writing rocking command payload: {payload.hex()}")
             
             # Optimistically update
             self.rocking_active = True
             self.time_remaining = duration_s
         else:
             payload = bytearray([0x00])
+            _LOGGER.debug(f"[Manager] Writing rocking command payload: {payload.hex()}")
             self.rocking_active = False
             self.time_remaining = 0
             
