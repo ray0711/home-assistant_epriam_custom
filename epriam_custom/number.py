@@ -4,7 +4,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import DOMAIN, DEVICE_INFO
 from .manager import EPriamManager
 
 async def async_setup_entry(
@@ -22,7 +22,7 @@ class EPriamIntensityNumber(NumberEntity):
     def __init__(self, manager: EPriamManager):
         self.manager = manager
         self._attr_name = "Rocking Intensity"
-        self._attr_unique_id = "epriam_continuous_rocking_intensity"
+        self._attr_unique_id = "epriam_custom_rocking_intensity"
         self._attr_native_min_value = 1
         self._attr_native_max_value = 3
         self._attr_native_step = 1
@@ -31,12 +31,7 @@ class EPriamIntensityNumber(NumberEntity):
 
     @property
     def device_info(self):
-        return {
-            "identifiers": {(DOMAIN, "cybex_epriam")},
-            "name": "Cybex e-Priam",
-            "manufacturer": "Cybex",
-            "model": "e-Priam Stroller",
-        }
+        return DEVICE_INFO
 
     async def async_added_to_hass(self):
         self.manager.register_callback(self.async_write_ha_state)
@@ -57,7 +52,7 @@ class EPriamDurationNumber(NumberEntity):
     def __init__(self, manager: EPriamManager):
         self.manager = manager
         self._attr_name = "Rocking Duration"
-        self._attr_unique_id = "epriam_continuous_rocking_duration"
+        self._attr_unique_id = "epriam_custom_rocking_duration"
         self._attr_native_min_value = 1
         self._attr_native_max_value = 180
         self._attr_native_step = 1
@@ -67,12 +62,7 @@ class EPriamDurationNumber(NumberEntity):
 
     @property
     def device_info(self):
-        return {
-            "identifiers": {(DOMAIN, "cybex_epriam")},
-            "name": "Cybex e-Priam",
-            "manufacturer": "Cybex",
-            "model": "e-Priam Stroller",
-        }
+        return DEVICE_INFO
 
     async def async_added_to_hass(self):
         self.manager.register_callback(self.async_write_ha_state)

@@ -1,6 +1,6 @@
 {
-  "domain": "epriam_continuous",
-  "name": "Cybex E-Priam (Continuous)",
+  "domain": "epriam_custom",
+  "name": "e-Priam Custom BLE",
   "codeowners": ["@yourusername"],
   "config_flow": true,
   "dependencies": ["bluetooth"],

@@ -21,6 +21,9 @@ class EPriamManager:
         
         self.rocking_active = False
         self.time_remaining = 0
+        self.status = "Disconnected"
+        self._rocking_error_received = None
+        self._rocking_started_received = None
         
         self._callbacks = []
         self._connect_task = None
@@ -85,8 +88,17 @@ class EPriamManager:
             
             if data[0] == 0x94: # 148 ^ 128 = 20 (Brake not engaged)
                 _LOGGER.warning("[Manager] Stroller reported: Brake not engaged. Rocking cannot start.")
+                self.status = "Brake Not Engaged"
                 self.rocking_active = False
                 self.time_remaining = 0
+                if self._rocking_error_received:
+                    self._rocking_error_received.set()
+            elif self.rocking_active:
+                self.status = "Rocking"
+                if self._rocking_started_received:
+                    self._rocking_started_received.set()
+            else:
+                self.status = "Stopped"
 
         self._notify_callbacks()
 
@@ -119,6 +131,7 @@ class EPriamManager:
                 )
                 
                 self.is_connected = True
+                self.status = "Connected"
                 
                 status_char = self._get_characteristic(CHAR_STATUS, "notify")
                 if not status_char:
@@ -144,6 +157,7 @@ class EPriamManager:
                 _LOGGER.error(f"[Manager] Connection dropped/failed: {e}")
             finally:
                 self.is_connected = False
+                self.status = "Disconnected"
                 self._notify_callbacks()
                 if self.client and self.client.is_connected:
                     await self.client.disconnect()
@@ -158,6 +172,8 @@ class EPriamManager:
         return await self._write_to_char(CHAR_DRIVE_MODE, payload)
 
     async def set_rocking_state(self, is_on: bool):
+        from homeassistant.exceptions import HomeAssistantError
+
         if is_on:
             # Stroller expects duration in seconds (16-bit integer, little-endian)
             duration_s = self.rocking_duration * 60
@@ -171,18 +187,54 @@ class EPriamManager:
             payload = bytearray([stroller_intensity, dur_lo, dur_hi])
             _LOGGER.debug(f"[Manager] Writing rocking command payload: {payload.hex()}")
             
+            self._rocking_error_received = asyncio.Event()
+            self._rocking_started_received = asyncio.Event()
+            
             # Optimistically update
             self.rocking_active = True
             self.time_remaining = duration_s
+            self._notify_callbacks()
+            
+            success = await self._write_to_char(CHAR_ROCKING, payload)
+            if not success:
+                self.rocking_active = False
+                self.time_remaining = 0
+                self.status = "Stopped"
+                self._notify_callbacks()
+                raise HomeAssistantError("Failed to write rocking command to stroller.")
+
+            # Wait for response from stroller
+            started_task = asyncio.create_task(self._rocking_started_received.wait())
+            error_task = asyncio.create_task(self._rocking_error_received.wait())
+            try:
+                await asyncio.wait(
+                    {started_task, error_task},
+                    timeout=1.5,
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+            except Exception as e:
+                _LOGGER.error(f"[Manager] Error waiting for status: {e}")
+            finally:
+                started_task.cancel()
+                error_task.cancel()
+
+            if self._rocking_error_received.is_set():
+                self.rocking_active = False
+                self.time_remaining = 0
+                self.status = "Brake Not Engaged"
+                self._notify_callbacks()
+                raise HomeAssistantError("Brake not engaged! Engage brake to start rocking.")
+            
+            return True
         else:
             payload = bytearray([0x00])
             _LOGGER.debug(f"[Manager] Writing rocking command payload: {payload.hex()}")
             self.rocking_active = False
             self.time_remaining = 0
-            
-        success = await self._write_to_char(CHAR_ROCKING, payload)
-        self._notify_callbacks()
-        return success
+            success = await self._write_to_char(CHAR_ROCKING, payload)
+            self.status = "Stopped"
+            self._notify_callbacks()
+            return success
 
     async def _write_to_char(self, char_uuid, payload: bytearray):
         if not self.is_connected or not self.client:

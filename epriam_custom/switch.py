@@ -4,7 +4,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import DOMAIN, DEVICE_INFO
 from .manager import EPriamManager
 
 async def async_setup_entry(
@@ -19,17 +19,12 @@ class EPriamContinuousSwitch(SwitchEntity):
     def __init__(self, manager: EPriamManager):
         self.manager = manager
         self._attr_name = "E-Priam Rocking"
-        self._attr_unique_id = "epriam_continuous_rocking_switch"
+        self._attr_unique_id = "epriam_custom_rocking_switch"
         self._attr_icon = "mdi:baby-carriage"
 
     @property
     def device_info(self):
-        return {
-            "identifiers": {(DOMAIN, "cybex_epriam")},
-            "name": "Cybex e-Priam",
-            "manufacturer": "Cybex",
-            "model": "e-Priam Stroller",
-        }
+        return DEVICE_INFO
 
     async def async_added_to_hass(self):
         self.manager.register_callback(self.async_write_ha_state)
