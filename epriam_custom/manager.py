@@ -1,14 +1,15 @@
 import logging
 import asyncio
+import time
 from bleak_retry_connector import establish_connection, BleakClientWithServiceCache
 from homeassistant.components.bluetooth import (
     BluetoothCallbackMatcher,
     BluetoothChange,
     BluetoothScanningMode,
     BluetoothServiceInfoBleak,
-    async_ble_device_from_address,
     async_discovered_service_info,
     async_register_callback,
+    async_scanner_devices_by_address,
 )
 from homeassistant.core import HomeAssistant
 
@@ -17,7 +18,10 @@ from .const import CHAR_STATUS, CHAR_ROCKING, CHAR_DRIVE_MODE, CYBEX_MANUFACTURE
 SERVICE_UUID = "a1fc0101-78d3-40c2-9b6f-3c5f7b2797df"
 # Safety net only; normally we are woken by advertisements / disconnects.
 FALLBACK_POLL_SECONDS = 60
+# Ignore history entries older than this (stale/rotated private addresses).
+MAX_ADVERTISEMENT_AGE_SECONDS = 30
 RECONNECT_BACKOFF_SECONDS = 2
+CONNECT_TIMEOUT_SECONDS = 45
 MAX_RECONNECT_BACKOFF_SECONDS = 60
 
 _LOGGER = logging.getLogger(__name__)
@@ -57,15 +61,29 @@ class EPriamManager:
             except Exception as e:
                 pass
 
+    @staticmethod
+    def _matches(discovery_info) -> bool:
+        if CYBEX_MANUFACTURER_ID in discovery_info.manufacturer_data:
+            return True
+        if SERVICE_UUID in discovery_info.service_uuids:
+            return True
+        return bool(discovery_info.name and "priam" in discovery_info.name.lower())
+
     def _get_device(self):
-        for discovery_info in async_discovered_service_info(self.hass, connectable=True):
-            if CYBEX_MANUFACTURER_ID in discovery_info.manufacturer_data:
-                return discovery_info.device
-            if SERVICE_UUID in discovery_info.service_uuids:
-                return discovery_info.device
-            if discovery_info.name and "Priam" in discovery_info.name:
-                return discovery_info.device
-        return None
+        """Return the freshest connectable device that is advertising right now.
+
+        The pram uses rotating private BLE addresses, so the discovery history
+        also holds old addresses that no longer exist. Only consider recent
+        advertisements and pick the newest (strongest on ties).
+        """
+        now = time.monotonic()
+        best = None
+        for info in async_discovered_service_info(self.hass, connectable=True):
+            if not self._matches(info) or now - info.time > MAX_ADVERTISEMENT_AGE_SECONDS:
+                continue
+            if best is None or (info.time, info.rssi) > (best.time, best.rssi):
+                best = info
+        return best.device if best else None
 
     def _get_characteristic(self, uuid_str, required_property=None):
         if not self.client or not self.client.services:
@@ -133,6 +151,7 @@ class EPriamManager:
             BluetoothCallbackMatcher(manufacturer_id=CYBEX_MANUFACTURER_ID, connectable=True),
             BluetoothCallbackMatcher(service_uuid=SERVICE_UUID, connectable=True),
             BluetoothCallbackMatcher(local_name="Priam*", connectable=True),
+            BluetoothCallbackMatcher(local_name="e-PRIAM*", connectable=True),
         ):
             self._unsub_bluetooth.append(
                 async_register_callback(
@@ -174,12 +193,20 @@ class EPriamManager:
             failed = False
             idle = False
             try:
+                # Clear once per pass (never in the backoff path) so an advert
+                # that arrives during a failing connect is not lost.
+                self._adv_event.clear()
                 ble_device = self._get_device()
+                # Only connect if a scanner currently has the device; otherwise
+                # HA fails with "no backend ... can reach address".
+                if ble_device and not async_scanner_devices_by_address(
+                    self.hass, ble_device.address, True
+                ):
+                    ble_device = None
                 if not ble_device:
                     self.is_connected = False
                     self._notify_callbacks()
                     # Event driven: wait for an advertisement (fallback poll).
-                    self._adv_event.clear()
                     try:
                         await asyncio.wait_for(
                             self._adv_event.wait(), FALLBACK_POLL_SECONDS
@@ -192,17 +219,15 @@ class EPriamManager:
                 # Per-attempt event so a late callback from an old client
                 # cannot end a newer connection.
                 disconnect_event = self._disconnect_event = asyncio.Event()
-                self.client = await establish_connection(
-                    BleakClientWithServiceCache,
-                    ble_device,
-                    "E-Priam",
-                    disconnected_callback=lambda _client: disconnect_event.set(),
-                    # Re-resolve the freshest connectable device (best proxy) on every retry.
-                    ble_device_callback=lambda: async_ble_device_from_address(
-                        self.hass, ble_device.address, connectable=True
-                    ) or ble_device,
-                    max_attempts=2
-                )
+                # Bound the connect: the address may rotate while HA retries.
+                async with asyncio.timeout(CONNECT_TIMEOUT_SECONDS):
+                    self.client = await establish_connection(
+                        BleakClientWithServiceCache,
+                        ble_device,
+                        "E-Priam",
+                        disconnected_callback=lambda _client: disconnect_event.set(),
+                        max_attempts=2
+                    )
                 
                 self.is_connected = True
                 self.status = "Connected"
@@ -238,8 +263,9 @@ class EPriamManager:
                 await self._safe_disconnect()
                 if not self._shutdown and not idle:
                     if failed:
-                        # Exponential backoff, but wake early on a fresh advertisement.
-                        self._adv_event.clear()
+                        # Exponential backoff, but wake early on a fresh advertisement
+                        # (minimum floor so constant adverts cannot cause a hot loop).
+                        await asyncio.sleep(RECONNECT_BACKOFF_SECONDS)
                         try:
                             await asyncio.wait_for(self._adv_event.wait(), backoff)
                         except asyncio.TimeoutError:
