@@ -6,6 +6,7 @@ from homeassistant.components.bluetooth import (
     BluetoothChange,
     BluetoothScanningMode,
     BluetoothServiceInfoBleak,
+    async_ble_device_from_address,
     async_discovered_service_info,
     async_register_callback,
 )
@@ -196,6 +197,10 @@ class EPriamManager:
                     ble_device,
                     "E-Priam",
                     disconnected_callback=lambda _client: disconnect_event.set(),
+                    # Re-resolve the freshest connectable device (best proxy) on every retry.
+                    ble_device_callback=lambda: async_ble_device_from_address(
+                        self.hass, ble_device.address, connectable=True
+                    ) or ble_device,
                     max_attempts=2
                 )
                 
