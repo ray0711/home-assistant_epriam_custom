@@ -1,10 +1,23 @@
 {
   "domain": "epriam_custom",
   "name": "e-Priam Custom BLE",
-  "codeowners": ["@yourusername"],
+  "codeowners": [
+    "@yourusername"
+  ],
   "config_flow": true,
-  "dependencies": ["bluetooth"],
-  "requirements": ["bleak", "bleak-retry-connector>=3.0.0"],
+  "dependencies": [
+    "bluetooth"
+  ],
   "iot_class": "local_push",
-  "version": "1.6.0"
+  "version": "1.6.0",
+  "bluetooth": [
+    {
+      "manufacturer_id": 1933,
+      "connectable": true
+    },
+    {
+      "service_uuid": "a1fc0101-78d3-40c2-9b6f-3c5f7b2797df",
+      "connectable": true
+    }
+  ]
 }

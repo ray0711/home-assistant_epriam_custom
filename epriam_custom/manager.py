@@ -1,10 +1,23 @@
 import logging
 import asyncio
 from bleak_retry_connector import establish_connection, BleakClientWithServiceCache
-from homeassistant.components.bluetooth import async_discovered_service_info
+from homeassistant.components.bluetooth import (
+    BluetoothCallbackMatcher,
+    BluetoothChange,
+    BluetoothScanningMode,
+    BluetoothServiceInfoBleak,
+    async_discovered_service_info,
+    async_register_callback,
+)
 from homeassistant.core import HomeAssistant
 
 from .const import CHAR_STATUS, CHAR_ROCKING, CHAR_DRIVE_MODE, CYBEX_MANUFACTURER_ID
+
+SERVICE_UUID = "a1fc0101-78d3-40c2-9b6f-3c5f7b2797df"
+# Safety net only; normally we are woken by advertisements / disconnects.
+FALLBACK_POLL_SECONDS = 60
+RECONNECT_BACKOFF_SECONDS = 2
+MAX_RECONNECT_BACKOFF_SECONDS = 60
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,6 +41,9 @@ class EPriamManager:
         self._callbacks = []
         self._connect_task = None
         self._shutdown = False
+        self._adv_event = asyncio.Event()
+        self._disconnect_event = asyncio.Event()
+        self._unsub_bluetooth = []
 
     def register_callback(self, callback):
         self._callbacks.append(callback)
@@ -44,7 +60,7 @@ class EPriamManager:
         for discovery_info in async_discovered_service_info(self.hass, connectable=True):
             if CYBEX_MANUFACTURER_ID in discovery_info.manufacturer_data:
                 return discovery_info.device
-            if "a1fc0101-78d3-40c2-9b6f-3c5f7b2797df" in discovery_info.service_uuids:
+            if SERVICE_UUID in discovery_info.service_uuids:
                 return discovery_info.device
             if discovery_info.name and "Priam" in discovery_info.name:
                 return discovery_info.device
@@ -102,36 +118,90 @@ class EPriamManager:
 
         self._notify_callbacks()
 
+    def _on_advertisement(
+        self, service_info: BluetoothServiceInfoBleak, change: BluetoothChange
+    ):
+        """Wake the connection loop as soon as any proxy/adapter sees the pram."""
+        if not self.is_connected:
+            self._adv_event.set()
+
     async def start(self):
         self._shutdown = False
-        self._connect_task = self.hass.async_create_task(self._connection_loop())
+        # One matcher per identifying trait (matchers are ANDed internally).
+        for matcher in (
+            BluetoothCallbackMatcher(manufacturer_id=CYBEX_MANUFACTURER_ID, connectable=True),
+            BluetoothCallbackMatcher(service_uuid=SERVICE_UUID, connectable=True),
+            BluetoothCallbackMatcher(local_name="Priam*", connectable=True),
+        ):
+            self._unsub_bluetooth.append(
+                async_register_callback(
+                    self.hass,
+                    self._on_advertisement,
+                    matcher,
+                    BluetoothScanningMode.ACTIVE,
+                )
+            )
+        # Background task: the loop never finishes, so it must not be tracked
+        # by bootstrap/startup (otherwise HA waits for it until the stage timeout).
+        self._connect_task = self.hass.async_create_background_task(
+            self._connection_loop(), "epriam_custom connection loop"
+        )
 
     async def stop(self):
         self._shutdown = True
-        if self.client and self.client.is_connected:
-            await self.client.disconnect()
+        for unsub in self._unsub_bluetooth:
+            unsub()
+        self._unsub_bluetooth.clear()
+        self._adv_event.set()
+        self._disconnect_event.set()
         if self._connect_task:
             self._connect_task.cancel()
+            await asyncio.gather(self._connect_task, return_exceptions=True)
+            self._connect_task = None
+        await self._safe_disconnect()
+
+    async def _safe_disconnect(self):
+        if self.client and self.client.is_connected:
+            try:
+                await self.client.disconnect()
+            except Exception:
+                _LOGGER.debug("[Manager] disconnect failed", exc_info=True)
 
     async def _connection_loop(self):
+        backoff = RECONNECT_BACKOFF_SECONDS
         while not self._shutdown:
+            failed = False
+            idle = False
             try:
                 ble_device = self._get_device()
                 if not ble_device:
                     self.is_connected = False
                     self._notify_callbacks()
-                    await asyncio.sleep(10)
+                    # Event driven: wait for an advertisement (fallback poll).
+                    self._adv_event.clear()
+                    try:
+                        await asyncio.wait_for(
+                            self._adv_event.wait(), FALLBACK_POLL_SECONDS
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+                    idle = True  # already waited; skip the reconnect delay
                     continue
 
+                # Per-attempt event so a late callback from an old client
+                # cannot end a newer connection.
+                disconnect_event = self._disconnect_event = asyncio.Event()
                 self.client = await establish_connection(
                     BleakClientWithServiceCache,
                     ble_device,
                     "E-Priam",
+                    disconnected_callback=lambda _client: disconnect_event.set(),
                     max_attempts=2
                 )
                 
                 self.is_connected = True
                 self.status = "Connected"
+                backoff = RECONNECT_BACKOFF_SECONDS
                 
                 status_char = self._get_characteristic(CHAR_STATUS, "notify")
                 if not status_char:
@@ -150,18 +220,28 @@ class EPriamManager:
 
                 self._notify_callbacks()
 
-                while self.client.is_connected and not self._shutdown:
-                    await asyncio.sleep(5)
+                if self.client.is_connected:
+                    await disconnect_event.wait()
                     
             except Exception as e:
-                _LOGGER.error(f"[Manager] Connection dropped/failed: {e}")
+                failed = True
+                _LOGGER.warning(f"[Manager] Connection dropped/failed: {e}")
             finally:
                 self.is_connected = False
                 self.status = "Disconnected"
                 self._notify_callbacks()
-                if self.client and self.client.is_connected:
-                    await self.client.disconnect()
-                await asyncio.sleep(5)
+                await self._safe_disconnect()
+                if not self._shutdown and not idle:
+                    if failed:
+                        # Exponential backoff, but wake early on a fresh advertisement.
+                        self._adv_event.clear()
+                        try:
+                            await asyncio.wait_for(self._adv_event.wait(), backoff)
+                        except asyncio.TimeoutError:
+                            pass
+                        backoff = min(backoff * 2, MAX_RECONNECT_BACKOFF_SECONDS)
+                    else:
+                        await asyncio.sleep(RECONNECT_BACKOFF_SECONDS)
 
     async def set_drive_mode(self, mode: str):
         self.drive_mode = mode
